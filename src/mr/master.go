@@ -66,7 +66,7 @@ func (m *Master) GetWork(args *CallForWorkArgs, reply *CallForWorkReply) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.mrState.state == MAP {
-		log.Print("GetWork() called for map work")
+		//log.Print("GetWork() called for map work")
 		if m.mrState.nMapIN_PROG+m.mrState.nMapDone == m.nMap {
 			reply.HasWork = false
 			return nil
@@ -80,7 +80,7 @@ func (m *Master) GetWork(args *CallForWorkArgs, reply *CallForWorkReply) error {
 				reply.WorkType = MAPWORK
 				reply.Content.Index = m.mapTaskList[i].index
 				reply.Content.Filename = m.mapTaskList[i].fileName
-				reply.Content.NumMapWOrk = m.nMap
+				reply.Content.NumMapWork = m.nMap
 				reply.Content.NumReduceWork = m.nReduce
 				return nil
 			}
@@ -88,7 +88,7 @@ func (m *Master) GetWork(args *CallForWorkArgs, reply *CallForWorkReply) error {
 		//should not reach here
 		return errors.New("master GetWork() get map work error")
 	} else if m.mrState.state == REDUCE {
-		log.Print("GetWork() called for reduce work")
+		//log.Print("GetWork() called for reduce work")
 		if m.mrState.nReduceIN_PROG+m.mrState.nReduceDone == m.nReduce {
 			reply.HasWork = false
 			return nil
@@ -219,13 +219,12 @@ func MakeMaster(files []string, nReduce int) *Master {
 	m.nMap = int32(len(files))
 	m.nReduce = int32(nReduce)
 
-	var i int32 = 0
 	m.mapTaskList = make([]MapTask, 0)
-	for i = 0; i < m.nMap; i++ {
+	for i := int32(0); i < m.nMap; i++ {
 		m.mapTaskList = append(m.mapTaskList, MapTask{index: i, fileName: files[i], state: IDLE})
 	}
 	m.reduceTaskList = make([]ReduceTask, 0)
-	for i = 0; i < m.nReduce; i++ {
+	for i := int32(0); i < m.nReduce; i++ {
 		m.reduceTaskList = append(m.reduceTaskList, ReduceTask{index: i, state: IDLE})
 	}
 

@@ -8,6 +8,7 @@ import (
 	"log"
 	"net/rpc"
 	"os"
+	"sort"
 	"strconv"
 	"time"
 )
@@ -19,6 +20,14 @@ type KeyValue struct {
 	Key   string
 	Value string
 }
+
+// for sorting by key.
+type ByKey []KeyValue
+
+// for sorting by key.
+func (a ByKey) Len() int           { return len(a) }
+func (a ByKey) Swap(i, j int)      { a[i], a[j] = a[j], a[i] }
+func (a ByKey) Less(i, j int) bool { return a[i].Key < a[j].Key }
 
 //
 // use ihash(key) % NReduce to choose the reduce
@@ -163,59 +172,111 @@ func call(rpcname string, args interface{}, reply interface{}) bool {
 }
 
 func DoMapWork(mapf func(string, string) []KeyValue, workContent WorkContent) error {
+	//load file and call mapf
 	filename := workContent.Filename
 	file, err := os.Open(filename)
 	if err != nil {
-		log.Printf("cannot open %v (%v)", filename, err)
+		log.Printf("DoMapWork() cannot open %v (%v)", filename, err)
 		return err
 	}
 	content, err := ioutil.ReadAll(file)
 	if err != nil {
-		log.Printf("cannot read %v (%v)", filename, err)
+		log.Printf("DoMapWork() cannot read %v (%v)", filename, err)
 		return err
 	}
 	file.Close()
 	kva := mapf(filename, string(content))
 
+	//split kv by hash values and save them to intermediate files
 	intermediate := [][]KeyValue{}
-	var i int32 = 0
-	for i = 0; i < workContent.NumReduceWork; i++ {
+
+	for i := int32(0); i < workContent.NumReduceWork; i++ {
 		intermediate = append(intermediate, []KeyValue{})
 	}
-	for i = 0; i < int32(len(kva)); i++ {
+	for i := int32(0); i < int32(len(kva)); i++ {
 		id := ihash(kva[i].Key) % int(workContent.NumReduceWork)
 		intermediate[id] = append(intermediate[id], kva[i])
 	}
-	for i = 0; i < workContent.NumReduceWork; i++ {
+	for i := int32(0); i < workContent.NumReduceWork; i++ {
 		tmpFile, err := ioutil.TempFile(".", "tmp-")
 		if err != nil {
-			log.Print("cannot create temporary file", err)
+			log.Print("DoMapWork() cannot create temporary file", err)
 			return err
 		}
 
 		// clean up the file afterwards
 		//defer os.Remove(tmpFile.Name())
+		//fmt.Println("created File: " + tmpFile.Name())
 
-		fmt.Println("created File: " + tmpFile.Name())
 		// writing to the file
 		enc := json.NewEncoder(tmpFile)
 		for _, kv := range intermediate[i] {
 			err := enc.Encode(&kv)
 			if err != nil {
-				log.Print("cannot write to tmp file", err)
+				log.Print("DoMapWork cannot write to tmp file", err)
 				return err
 			}
 		}
 		err = os.Rename(tmpFile.Name(), "mr-"+strconv.Itoa(int(workContent.Index))+"-"+strconv.Itoa(int(i)))
 		if err != nil {
-			log.Print("os rename error", err)
+			log.Print("DoMapWork os rename error", err)
 			return err
 		}
 	}
 	return nil
 }
 
-func DoReduceWork(reducef func(string, []string) string, content WorkContent) error {
+func DoReduceWork(reducef func(string, []string) string, workContent WorkContent) error {
+	//load intermediate results, file naming from mr-0-rNum to mr-nMap-rNum
+	intermediate := []KeyValue{}
+	for i := int32(0); i < workContent.NumMapWork; i++ {
+		filename := "mr-" + strconv.Itoa(int(i)) + "-" + strconv.Itoa(int(workContent.Index))
+		file, err := os.Open(filename)
+		if err != nil {
+			log.Print("DoReduceWork() open map file error", err)
+			return err
+		}
 
+		dec := json.NewDecoder(file)
+		for {
+			var kv KeyValue
+			if err := dec.Decode(&kv); err != nil {
+				break
+			}
+			intermediate = append(intermediate, kv)
+		}
+	}
+
+	sort.Sort(ByKey(intermediate))
+
+	oname := "mr-out-" + strconv.Itoa(int(workContent.Index))
+	ofile, err := os.Create(oname)
+	if err != nil {
+		log.Print("DoReduceWork() os create error:", err)
+		return err
+	}
+
+	// call Reduce on each distinct key in intermediate[],
+	// and print the result to mr-out-rNum.
+
+	i := 0
+	for i < len(intermediate) {
+		j := i + 1
+		for j < len(intermediate) && intermediate[j].Key == intermediate[i].Key {
+			j++
+		}
+		values := []string{}
+		for k := i; k < j; k++ {
+			values = append(values, intermediate[k].Value)
+		}
+		output := reducef(intermediate[i].Key, values)
+
+		// this is the correct format for each line of Reduce output.
+		fmt.Fprintf(ofile, "%v %v\n", intermediate[i].Key, output)
+
+		i = j
+	}
+
+	ofile.Close()
 	return nil
 }
