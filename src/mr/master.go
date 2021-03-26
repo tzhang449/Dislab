@@ -8,6 +8,7 @@ import (
 	"net/rpc"
 	"os"
 	"sync"
+	"time"
 )
 
 type MRStateType int32
@@ -38,11 +39,13 @@ type MapTask struct {
 	index    int32
 	fileName string
 	state    TaskStateType
+	timer    *time.Timer
 }
 
 type ReduceTask struct {
 	index int32
 	state TaskStateType
+	timer *time.Timer
 }
 
 type Master struct {
@@ -74,7 +77,10 @@ func (m *Master) GetWork(args *CallForWorkArgs, reply *CallForWorkReply) error {
 		for i := int32(0); i < m.nMap; i++ {
 			if m.mapTaskList[i].state == IDLE {
 				m.mapTaskList[i].state = IN_PROGRESS
+				timeOutFunc := m.genTimeOutFunc(MAPWORK, i)
+				m.mapTaskList[i].timer = time.AfterFunc(10*time.Second, timeOutFunc)
 				m.mrState.nMapIN_PROG++
+
 				//send the work
 				reply.HasWork = true
 				reply.WorkType = MAPWORK
@@ -82,6 +88,7 @@ func (m *Master) GetWork(args *CallForWorkArgs, reply *CallForWorkReply) error {
 				reply.Content.Filename = m.mapTaskList[i].fileName
 				reply.Content.NumMapWork = m.nMap
 				reply.Content.NumReduceWork = m.nReduce
+				log.Print("map task assigned:", i)
 				return nil
 			}
 		}
@@ -96,6 +103,8 @@ func (m *Master) GetWork(args *CallForWorkArgs, reply *CallForWorkReply) error {
 		for i := int32(0); i < m.nReduce; i++ {
 			if m.reduceTaskList[i].state == IDLE {
 				m.reduceTaskList[i].state = IN_PROGRESS
+				timeOutFunc := m.genTimeOutFunc(REDUCEWORK, i)
+				m.reduceTaskList[i].timer = time.AfterFunc(10*time.Second, timeOutFunc)
 				m.mrState.nReduceIN_PROG++
 				//send the work
 				reply.HasWork = true
@@ -103,6 +112,7 @@ func (m *Master) GetWork(args *CallForWorkArgs, reply *CallForWorkReply) error {
 				reply.Content.Index = m.reduceTaskList[i].index
 				reply.Content.NumMapWork = m.nMap
 				reply.Content.NumReduceWork = m.nReduce
+				log.Print("reduce task assigned:", i)
 				return nil
 			}
 		}
@@ -131,6 +141,10 @@ func (m *Master) WorkDone(args *CallWorkDoneArgs, reply *CallWorkDoneReply) erro
 			m.mrState.nMapIN_PROG--
 		}
 		m.mapTaskList[args.Content.Index].state = COMPLETED
+		log.Print("map task:", args.Content.Index, " done")
+		if m.mapTaskList[args.Content.Index].timer != nil {
+			m.mapTaskList[args.Content.Index].timer.Stop()
+		}
 		if m.mrState.nMapDone == m.nMap {
 			m.mrState.state = REDUCE
 		}
@@ -147,6 +161,10 @@ func (m *Master) WorkDone(args *CallWorkDoneArgs, reply *CallWorkDoneReply) erro
 			m.mrState.nReduceIN_PROG--
 		}
 		m.reduceTaskList[args.Content.Index].state = COMPLETED
+		log.Print("reduce task:", args.Content.Index, " done")
+		if m.reduceTaskList[args.Content.Index].timer != nil {
+			m.reduceTaskList[args.Content.Index].timer.Stop()
+		}
 		if m.mrState.nReduceDone == m.nReduce {
 			m.mrState.state = ALLDONE
 		}
@@ -154,6 +172,37 @@ func (m *Master) WorkDone(args *CallWorkDoneArgs, reply *CallWorkDoneReply) erro
 		return nil
 	} else {
 		return errors.New("master WorkDone() args.WorkType error")
+	}
+}
+
+func (m *Master) genTimeOutFunc(workType WorkType, index int32) func() {
+	return func() {
+		m.timeOut(workType, index)
+	}
+}
+
+func (m *Master) timeOut(workType WorkType, index int32) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	log.Print("timeout! worktype=", workType, " index=", index)
+	if workType == MAPWORK {
+		state := m.mapTaskList[index].state
+		if state != COMPLETED {
+			if state == IN_PROGRESS {
+				m.mrState.nMapIN_PROG--
+			}
+			m.mapTaskList[index].state = IDLE
+			m.mapTaskList[index].timer = nil
+		}
+	} else if workType == REDUCEWORK {
+		state := m.reduceTaskList[index].state
+		if state != COMPLETED {
+			if state == IN_PROGRESS {
+				m.mrState.nReduceIN_PROG--
+			}
+			m.reduceTaskList[index].state = IDLE
+			m.reduceTaskList[index].timer = nil
+		}
 	}
 }
 

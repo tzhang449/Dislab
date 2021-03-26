@@ -3,4 +3,4 @@ cd mrapps
 make clean
 make
 cd ..
-go run main/mrworker.go mrapps/wc.so
+go run main/mrworker.go mrapps/crash.so
