@@ -19,6 +19,7 @@ const (
 	ALLDONE MRStateType = 2
 )
 
+//state of the mr task
 type MRState struct {
 	state          MRStateType
 	nMapIN_PROG    int32
@@ -35,6 +36,7 @@ const (
 	COMPLETED   TaskStateType = 2
 )
 
+//map task data structure
 type MapTask struct {
 	index    int32
 	fileName string
@@ -42,6 +44,7 @@ type MapTask struct {
 	timer    *time.Timer
 }
 
+//reduce task data structure
 type ReduceTask struct {
 	index int32
 	state TaskStateType
@@ -54,6 +57,7 @@ type Master struct {
 	// We first try the simplest lock, get the program run first
 	mu sync.Mutex
 
+	// master stores the state of the task, lists for mr tasks and their total number
 	mrState        MRState
 	mapTaskList    []MapTask
 	reduceTaskList []ReduceTask
@@ -64,24 +68,31 @@ type Master struct {
 // Your code here -- RPC handlers for the worker to call.
 
 // this func is called by the worker to get either map or reduce work,
-// depending on the state of Master
+// depending on the state of the task
 func (m *Master) GetWork(args *CallForWorkArgs, reply *CallForWorkReply) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.mrState.state == MAP {
 		//log.Print("GetWork() called for map work")
+
+		//no more task avaiable, the worker shall wait
 		if m.mrState.nMapIN_PROG+m.mrState.nMapDone == m.nMap {
 			reply.HasWork = false
 			return nil
 		}
+
 		for i := int32(0); i < m.nMap; i++ {
 			if m.mapTaskList[i].state == IDLE {
+				//this work is available
 				m.mapTaskList[i].state = IN_PROGRESS
+
+				//fire the timer, this creates another go routine that calls timeOutFunc once timeout,
+				//we wait 10 seconds here, as is described in the hints
 				timeOutFunc := m.genTimeOutFunc(MAPWORK, i)
 				m.mapTaskList[i].timer = time.AfterFunc(10*time.Second, timeOutFunc)
 				m.mrState.nMapIN_PROG++
 
-				//send the work
+				//send the task
 				reply.HasWork = true
 				reply.WorkType = MAPWORK
 				reply.Content.Index = m.mapTaskList[i].index
@@ -96,17 +107,23 @@ func (m *Master) GetWork(args *CallForWorkArgs, reply *CallForWorkReply) error {
 		return errors.New("master GetWork() get map work error")
 	} else if m.mrState.state == REDUCE {
 		//log.Print("GetWork() called for reduce work")
+
+		//no more task avaiable, the worker shall wait
 		if m.mrState.nReduceIN_PROG+m.mrState.nReduceDone == m.nReduce {
 			reply.HasWork = false
 			return nil
 		}
 		for i := int32(0); i < m.nReduce; i++ {
 			if m.reduceTaskList[i].state == IDLE {
+				//this work is available
 				m.reduceTaskList[i].state = IN_PROGRESS
+
+				//fire the timer, this creates another go routine that calls timeOutFunc once timeout
 				timeOutFunc := m.genTimeOutFunc(REDUCEWORK, i)
 				m.reduceTaskList[i].timer = time.AfterFunc(10*time.Second, timeOutFunc)
 				m.mrState.nReduceIN_PROG++
-				//send the work
+
+				//send the task
 				reply.HasWork = true
 				reply.WorkType = REDUCEWORK
 				reply.Content.Index = m.reduceTaskList[i].index
@@ -119,6 +136,7 @@ func (m *Master) GetWork(args *CallForWorkArgs, reply *CallForWorkReply) error {
 		//should not reach here
 		return errors.New("master GetWork() get reduce work error")
 	} else if m.mrState.state == ALLDONE {
+		//All done here
 		reply.HasWork = false
 		return nil
 	} else {
@@ -127,10 +145,12 @@ func (m *Master) GetWork(args *CallForWorkArgs, reply *CallForWorkReply) error {
 	}
 }
 
+//this func is called by the worker to report a completed task.
 func (m *Master) WorkDone(args *CallWorkDoneArgs, reply *CallWorkDoneReply) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if args.WorkType == MAPWORK {
+		// map work done
 		state := m.mapTaskList[args.Content.Index].state
 
 		if state == COMPLETED {
@@ -142,6 +162,8 @@ func (m *Master) WorkDone(args *CallWorkDoneArgs, reply *CallWorkDoneReply) erro
 		}
 		m.mapTaskList[args.Content.Index].state = COMPLETED
 		log.Print("map task:", args.Content.Index, " done")
+
+		//we need to stop the timer here. Note that the timer may not be exactly the same timer that invoked by the worker, since this worker could be timeout before another worker assigned with this task. This will not effect the behavior of the program.
 		if m.mapTaskList[args.Content.Index].timer != nil {
 			m.mapTaskList[args.Content.Index].timer.Stop()
 		}
@@ -151,6 +173,7 @@ func (m *Master) WorkDone(args *CallWorkDoneArgs, reply *CallWorkDoneReply) erro
 
 		return nil
 	} else if args.WorkType == REDUCEWORK {
+		//same step as map work
 		state := m.reduceTaskList[args.Content.Index].state
 
 		if state == COMPLETED {
@@ -175,17 +198,21 @@ func (m *Master) WorkDone(args *CallWorkDoneArgs, reply *CallWorkDoneReply) erro
 	}
 }
 
+//generate a timeOut func, used for time.AfterFunc() for crash recovery
 func (m *Master) genTimeOutFunc(workType WorkType, index int32) func() {
 	return func() {
 		m.timeOut(workType, index)
 	}
 }
 
+//the timeout function used to reset the timeout work
 func (m *Master) timeOut(workType WorkType, index int32) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	log.Print("timeout! worktype=", workType, " index=", index)
 	if workType == MAPWORK {
+		//a map work has timed out, basic logic is to check whether state is COMPLETED or not,
+		//then reset the work and remove the timer
 		state := m.mapTaskList[index].state
 		if state != COMPLETED {
 			if state == IN_PROGRESS {
